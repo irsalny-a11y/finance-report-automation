@@ -1,0 +1,494 @@
+{
+  "name": "WhatsApp → Таблица",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Загрузка чата WhatsApp",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "chat",
+              "fieldType": "file",
+              "acceptFileTypes": ".txt"
+            },
+            {
+              "fieldLabel": "from",
+              "fieldType": "date"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -512,
+        0
+      ],
+      "id": "d3962184-f383-444f-a54f-c96c89d13328",
+      "name": "Форма",
+      "webhookId": "YOUR_WEBHOOK_ID"
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "chat",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -352,
+        0
+      ],
+      "id": "de72911a-7e03-430a-9eb4-b6b7f5b0c308",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "jsCode": "let text = $input.first().json.data || '';\nconst fromDate = $('Форма').first().json.from || '';\ntext = text.replace(/[\\u200e\\u200f\\u202a-\\u202e\\u2068\\u2069]/g, '');\nconst re = /^\\[?(\\d{1,2})[./](\\d{1,2})[./](\\d{2,4}),?\\s+(\\d{1,2}:\\d{2})(?::\\d{2})?\\]?\\s*[-–]?\\s*(.*)$/;\nconst msgs = [];\nfor (const line of text.split(/\\r?\\n/)) {\n  const m = line.match(re);\n  if (m) {\n    let [, d, mo, y, time, rest] = m;\n    if (y.length === 2) y = '20' + y;\n    const i = rest.indexOf(': ');\n    if (i === -1) { msgs.push(null); continue; }\n    msgs.push({ d: d.padStart(2,'0'), mo: mo.padStart(2,'0'), y, time,\n                author: rest.slice(0, i).trim(), text: rest.slice(i + 2) });\n  } else if (msgs.length && msgs[msgs.length - 1]) {\n    msgs[msgs.length - 1].text += '\\n' + line;\n  }\n}\nconst hash = s => { let h = 5381; for (const c of s) h = ((h << 5) + h + c.charCodeAt(0)) >>> 0; return h.toString(36); };\nreturn msgs.filter(Boolean)\n  .map(x => ({ ...x, text: x.text.replace(/<Сообщение изменено>|<Без медиафайлов>/gi, '').trim() }))\n  .filter(x => x.text && /\\d/.test(x.text) && !/^Данное сообщение удалено/i.test(x.text))\n  .filter(x => !fromDate || `${x.y}-${x.mo}-${x.d}` >= fromDate)\n  .map(x => ({ json: {\n    id: `${x.y}${x.mo}${x.d}-${x.time}-${hash(x.author + x.text)}`,\n    date: `${x.d}.${x.mo}.${x.y}`, time: x.time, author: x.author, text: x.text\n  }}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -192,
+        0
+      ],
+      "id": "e193f897-fcb3-40c8-9053-25101fd4ad44",
+      "name": "Разбор"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Ты — бухгалтер. Разбери сообщение из рабочей WhatsApp-группы учёта денег.\nАвтор: {{ $json.author }}\nДата сообщения: {{ $json.date }}\nТекст: \"\"\"{{ $json.text }}\"\"\"\n\nВерни массив operations — по одной записи на каждую денежную операцию в сообщении.\nЕсли операций нет (обсуждение, вопрос, остатки по счетам) — верни пустой массив.\n\nПоля каждой операции:\n- direction: \"Списание\" для «Расход…»; \"Поступление\" для «Внес на…», «Приход…»\n- date: дата операции ДД.ММ.ГГГГ. Если в тексте явно указана другая дата операции — её, иначе дату сообщения.\n- amount: сумма в рублях, положительное число. ВАЖНО: точка перед ровно тремя цифрами — разделитель тысяч (\"11.000₽\" = 11000, \"1.054.000\" = 1054000); две цифры после точки — копейки (\"19 657.14\" = 19657.14). Знаки ₽, р, ! убрать.\n- payment: \"Сбер\", \"Альфа\" или \"Наличные\" (наличка, налом). Если счёт не указан — пустая строка.\n- article: статья. Выбирай из списка: общие расходы, топливо, аванс, кредит, инвестор, зарплата, возврат зарплаты, доставка. Если не подходит ни одна — напиши своими словами и заполни check.\n- project: проект, если упомянут («проект №1», «проект А»), иначе пусто.\n- counterparty: кому заплатили или от кого пришли деньги (имя, компания), иначе пусто.\n- purpose: назначение — остальные детали коротко.\n- check: пусто, если всё однозначно. Иначе коротко причина: «не указан счёт», «неясная сумма», «исправление/опечатка», «возможны разные трактовки».",
+        "hasOutputParser": true,
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        -32,
+        0
+      ],
+      "id": "d39deb7b-1f88-4c54-9c65-715ae0ddb6d7",
+      "name": "Basic LLM Chain",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-haiku-5-5",
+          "mode": "list",
+          "cachedResultName": "Claude Haiku 5.5"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        16,
+        208
+      ],
+      "id": "62b08fd2-a331-4d97-bbcc-fd31d8713307",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\"operations\":[{\"direction\":\"Списание\",\"date\":\"02.10.2026\",\"amount\":10500,\"payment\":\"Сбер\",\"article\":\"топливо\",\"project\":\"\",\"counterparty\":\"\",\"purpose\":\"доставка материалов\",\"check\":\"\"}]}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        224,
+        208
+      ],
+      "id": "6adfbf4e-7f97-471e-a889-3641336ab711",
+      "name": "Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\n$input.all().forEach((item, i) => {\n  const src = $('Разбор').itemMatching(i).json;\n  const ops = (item.json.output && item.json.output.operations) || [];\n  ops.forEach((op, k) => out.push({ json: {\n    ...op, id: `${src.id}-${k}`, author: src.author, text: src.text\n  }}));\n});\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        0
+      ],
+      "id": "8d365f4a-9997-4fe8-a477-5e02f4dca1cf",
+      "name": "Операции"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "Operations sheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Лист1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ID": "=\t{{ $json.id }}",
+            "Проекты": "={{ $json.project }}",
+            "Дата": "={{ $json.date }}",
+            "Месяц": "={{ ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'][Number($json.date.split('.')[1]) - 1] }}",
+            "Год": "=\t{{ $json.date.split('.')[2] }}",
+            "Списание/Поступление": "={{ $json.direction }}",
+            "ИТОГО в рублях": "",
+            "Сумма операций (руб.)": "={{ $json.amount }}",
+            "Контрагент": "={{ $json.counterparty }}",
+            "Назначение ": "={{ $json.purpose }}",
+            "Статья": "=\t{{ $json.article }}",
+            "Карта/наличные": "={{ $json.payment }}",
+            "Информатор": "={{ $json.author }}",
+            "Исходный текст": "={{ $json.text }}",
+            "Проверить.": "={{ $json.check }}"
+          },
+          "matchingColumns": [
+            "ID"
+          ],
+          "schema": [
+            {
+              "id": "Проекты",
+              "displayName": "Проекты",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Дата",
+              "displayName": "Дата",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Месяц",
+              "displayName": "Месяц",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Год",
+              "displayName": "Год",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Списание/Поступление",
+              "displayName": "Списание/Поступление",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ИТОГО в рублях",
+              "displayName": "ИТОГО в рублях",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Сумма операций (руб.)",
+              "displayName": "Сумма операций (руб.)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "курс доллара",
+              "displayName": "курс доллара",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Сумма операций (доллары)",
+              "displayName": "Сумма операций (доллары)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "курс юаня",
+              "displayName": "курс юаня",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": " Сумма операций (юани) ",
+              "displayName": " Сумма операций (юани) ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Контрагент",
+              "displayName": "Контрагент",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Назначение ",
+              "displayName": "Назначение ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Статья",
+              "displayName": "Статья",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Не учитывать",
+              "displayName": "Не учитывать",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Карта/наличные",
+              "displayName": "Карта/наличные",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Тип перевода",
+              "displayName": "Тип перевода",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Информатор",
+              "displayName": "Информатор",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Партнер",
+              "displayName": "Партнер",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Тип проекта",
+              "displayName": "Тип проекта",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ID",
+              "displayName": "ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Исходный текст",
+              "displayName": "Исходный текст",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Проверить.",
+              "displayName": "Проверить.",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        432,
+        0
+      ],
+      "id": "2087f3ae-893a-40ba-82cf-ab1d949c43ec",
+      "name": "Append or update row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Форма": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "Разбор",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разбор": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Операции",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Операции": {
+      "main": [
+        [
+          {
+            "node": "Append or update row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "84a1a711-f48e-4d2f-bf0f-cdf9930c33b4",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "YOUR_INSTANCE_ID"
+  },
+  "nodeGroups": [],
+  "id": "YOUR_WORKFLOW_ID",
+  "tags": []
+}
