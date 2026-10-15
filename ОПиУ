@@ -1,0 +1,617 @@
+/**
+ * ============================================================
+ *  ОТЧЁТ О ПРИБЫЛЯХ И УБЫТКАХ — Google Apps Script
+ *  ФИНАЛЬНАЯ ВЕРСИЯ
+ *  + Доставка автовозами из колонки C листа Продажи
+ * ============================================================
+ */
+
+
+// ════════════════════════════════════════════════════════════
+//  ШАГ 0: РАСЧЁТ ОБЩИХ РАСХОДОВ → E1
+// ════════════════════════════════════════════════════════════
+
+function calcAndSetOverhead() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const sheetDetail = ss.getSheets().find(s =>
+    s.getName().toLowerCase().includes("расшифровка")
+  );
+  const sheetReport = ss.getSheets().find(s =>
+    s.getName().toLowerCase().includes("отчет")
+  );
+
+  if (!sheetDetail || !sheetReport) {
+    const missing = [
+      !sheetDetail ? "«Расшифровка»" : null,
+      !sheetReport ? "«Отчеты»"      : null,
+    ].filter(Boolean).join(", ");
+    SpreadsheetApp.getUi().alert(
+      `⚠️ Ошибка\n\nНе найден лист: ${missing}\nПроверьте названия листов.`
+    );
+    return 0;
+  }
+
+  const targetMonth = Number(sheetReport.getRange("B1").getValue());
+  const targetYear  = Number(sheetReport.getRange("C1").getValue());
+
+  if (!targetMonth || isNaN(targetMonth) || targetMonth < 1 || targetMonth > 12) {
+    SpreadsheetApp.getUi().alert(
+      "⚠️ Ошибка\n\nЯчейка B1 пуста или не число.\nВведите номер месяца от 1 до 12."
+    );
+    return 0;
+  }
+  if (!targetYear || isNaN(targetYear) || targetYear < 2000) {
+    SpreadsheetApp.getUi().alert(
+      "⚠️ Ошибка\n\nЯчейка C1 пуста или не число.\nВведите год, например 2026."
+    );
+    return 0;
+  }
+
+  Logger.log(`calcAndSetOverhead: месяц=${targetMonth}, год=${targetYear}`);
+
+  const data   = sheetDetail.getDataRange().getValues();
+  const header = data[0].map(h => String(h).trim().toLowerCase());
+
+  const COL_MONTH  = header.findIndex(h => h === "месяц");
+  const COL_YEAR   = header.findIndex(h => h === "год");
+  const COL_AMOUNT = header.findIndex(h =>
+    h.includes("итого в рублях") || h === "итого"
+  );
+  const COL_NE = header.findIndex(h => h.includes("не учитывать"));
+
+  const notFound = [
+    { idx: COL_MONTH,  name: "«Месяц»"         },
+    { idx: COL_YEAR,   name: "«Год»"            },
+    { idx: COL_AMOUNT, name: "«ИТОГО в рублях»" },
+    { idx: COL_NE,     name: "«Не учитывать»"   },
+  ].filter(c => c.idx === -1).map(c => c.name);
+
+  if (notFound.length > 0) {
+    Logger.log(`calcAndSetOverhead: не найдены колонки — ${notFound.join(", ")}`);
+    SpreadsheetApp.getUi().alert(
+      `⚠️ Ошибка\n\nНе найдены колонки в Расшифровке:\n${notFound.join("\n")}`
+    );
+    return 0;
+  }
+
+  let total       = 0;
+  let matchedRows = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (Number(row[COL_MONTH]) !== targetMonth) continue;
+    if (Number(row[COL_YEAR])  !== targetYear)  continue;
+    const ne = String(row[COL_NE]).trim().toLowerCase();
+    if (ne !== "общие расходы") continue;
+    const amount = parseFloat(
+      String(row[COL_AMOUNT]).replace(/\s/g, "").replace(",", ".")
+    );
+    if (isNaN(amount)) continue;
+    total += amount;
+    matchedRows++;
+  }
+
+  Logger.log(`calcAndSetOverhead: строк=${matchedRows}, сумма=${total}`);
+
+  sheetReport.getRange("E1").setValue(total);
+  SpreadsheetApp.flush();
+
+  return total;
+}
+
+
+// ════════════════════════════════════════════════════════════
+//  ГЛАВНАЯ ФУНКЦИЯ
+// ════════════════════════════════════════════════════════════
+
+const COLORS = {
+  headerBg      : "#1a2f4e",
+  headerText    : "#ffffff",
+  projectBg     : "#2c5282",
+  projectText   : "#ffffff",
+  rowEven       : "#f7f9fc",
+  rowOdd        : "#ffffff",
+  subtotalBg    : "#dbeafe",
+  subtotalText  : "#1e3a5f",
+  subtotalBorder: "#93c5fd",
+  grandBg       : "#1a2f4e",
+  grandText     : "#ffffff",
+  gridColor     : "#cbd5e1",
+  gridDark      : "#94a3b8",
+};
+
+function generateProfitReport() {
+
+  // ── ШАГ 0: считаем общие расходы → E1 ───────────────────────
+  const totalOverhead = calcAndSetOverhead();
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const sheetSales   = findSheet(ss, "Продажи");
+  const sheetDetail  = findSheet(ss, "Расшифровка");
+  const sheetReport  = findSheet(ss, "Отчет");
+
+  if (!sheetSales || !sheetDetail || !sheetReport) {
+    const names = ss.getSheets().map(s => `"${s.getName()}"`).join(", ");
+    showError(`Не найден один из листов.\nВсе листы: ${names}`);
+    return;
+  }
+
+  const targetMonth = Number(sheetReport.getRange("B1").getValue());
+  const targetYear  = Number(sheetReport.getRange("C1").getValue());
+
+  if (!targetMonth || targetMonth < 1 || targetMonth > 12) {
+    showError("B1 должна содержать номер месяца (1-12).");
+    return;
+  }
+  if (!targetYear || targetYear < 2000) {
+    showError("C1 должна содержать год (например, 2026).");
+    return;
+  }
+
+  // ── Шаг 1: Проекты из Продажи + доставка автовозами ─────────
+  const salesData      = sheetSales.getDataRange().getValues();
+  const salesHeader    = salesData[0].map(h => String(h).trim().toLowerCase());
+
+  // Ищем колонку "Доставка автовозами" в заголовке листа Продажи
+  const COL_DELIVERY   = salesHeader.findIndex(h =>
+    h.includes("доставка автовозами") || h.includes("автовоз")
+  );
+
+  const projectOrder      = [];
+  const uniqueSalesSet    = new Set();
+  const salesOrigNames    = {};
+  const deliveryMap       = {}; // salesKey → сумма доставки автовозами (или 0)
+
+  for (let i = 1; i < salesData.length; i++) {
+    const project  = String(salesData[i][0]).trim();
+    const month    = Number(salesData[i][1]);
+    const delivery = COL_DELIVERY !== -1
+      ? parseNum(salesData[i][COL_DELIVERY]) : 0;
+
+    if (!project) continue;
+    if (month === targetMonth) {
+      const key = project.toLowerCase();
+      if (!uniqueSalesSet.has(key)) {
+        uniqueSalesSet.add(key);
+        projectOrder.push(key);
+        salesOrigNames[key] = project;
+      }
+      // Сохраняем сумму доставки (0 если пусто или NaN)
+      deliveryMap[key] = isNaN(delivery) ? 0 : delivery;
+    }
+  }
+
+  if (projectOrder.length === 0) {
+    showError(`Нет проектов за месяц ${targetMonth}.`);
+    return;
+  }
+
+  const projectCount = projectOrder.length;
+
+  // ── Шаг 2: Читаем Расшифровку ────────────────────────────────
+  const detailData = sheetDetail.getDataRange().getValues();
+  const dHeader    = detailData[0].map(h => String(h).trim().toLowerCase());
+
+  const COL_PROJ   = findCol(dHeader, ["проект"]);
+  const COL_TYPE   = findCol(dHeader, ["списание/поступление"]);
+  const COL_AMOUNT = findCol(dHeader, ["итого в рублях", "итого"]);
+  const COL_ART    = findCol(dHeader, ["статья"]);
+
+  // ── Шаг 3: candidateList = ВСЕ уникальные проекты Расшифровки ──
+  const detailProjectNames = new Set();
+  for (let i = 1; i < detailData.length; i++) {
+    const p = String(detailData[i][COL_PROJ]).trim();
+    if (p) detailProjectNames.add(p);
+  }
+  const candidateList = Array.from(detailProjectNames);
+
+  // ── Шаг 4: Сопоставление с защитой от дублей ─────────────────
+  const matchMap           = {};
+  const usedDetailProjects = new Set();
+
+  const scored = projectOrder.map(salesKey => {
+    const { match, score } = findBestMatch(
+      salesOrigNames[salesKey], candidateList
+    );
+    return { salesKey, match, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  scored.forEach(({ salesKey, match }) => {
+    if (match && !usedDetailProjects.has(match)) {
+      matchMap[salesKey] = match;
+      usedDetailProjects.add(match);
+    } else {
+      const { match: alt } = findBestMatch(
+        salesOrigNames[salesKey],
+        candidateList.filter(c => !usedDetailProjects.has(c))
+      );
+      matchMap[salesKey] = alt || null;
+      if (alt) usedDetailProjects.add(alt);
+    }
+  });
+
+  // ── Шаг 5: Группируем строки Расшифровки (ВСЕ месяцы проекта) ──
+  const projectData = {};
+  projectOrder.forEach(key => { projectData[key] = []; });
+
+  for (let i = 1; i < detailData.length; i++) {
+    const row        = detailData[i];
+    const detailProj = String(row[COL_PROJ]).trim();
+    if (!detailProj) continue;
+
+    const salesKey = projectOrder.find(k => matchMap[k] === detailProj);
+    if (!salesKey) continue;
+
+    const opType  = String(row[COL_TYPE]).trim();
+    const amount  = parseNum(row[COL_AMOUNT]);
+    const article = String(row[COL_ART] || "").trim();
+
+    const income  = opType === "Поступление" ? Math.abs(amount) : 0;
+    const expense = opType === "Списание"    ? -Math.abs(amount) : 0;
+
+    projectData[salesKey].push({ article, income, expense });
+  }
+
+  // ── Шаг 6: Строим outputRows ─────────────────────────────────
+  const overheadPerProject = projectCount > 0
+    ? Math.abs(totalOverhead) / projectCount : 0;
+
+  const outputRows = [];
+  const rowMeta    = [];
+
+  let grandSumC = 0, grandSumD = 0, grandSumE = 0;
+  let grandSumF = 0, grandSumG = 0;
+  const marginValues = [];
+
+  projectOrder.forEach((key, projIdx) => {
+    const origName      = salesOrigNames[key];
+    const rows          = projectData[key];
+    const isEvenProject = projIdx % 2 === 0;
+    const deliveryCost  = deliveryMap[key] || 0; // сумма доставки автовозами
+
+    if (rows.length === 0 && deliveryCost === 0) {
+      // Совсем нет данных
+      outputRows.push([origName, "(нет данных в расшифровке)",
+        "", "", "", "", "", "", ""]);
+      rowMeta.push({ type: "project_first", even: isEvenProject });
+      outputRows.push(["Итого по Проекту", "",
+        0, 0, 0, overheadPerProject, -overheadPerProject, "", ""]);
+      rowMeta.push({ type: "subtotal" });
+      grandSumF += overheadPerProject;
+      grandSumG += -overheadPerProject;
+      return;
+    }
+
+    // Строки статей из Расшифровки
+    rows.forEach((r, idx) => {
+      outputRows.push([
+        idx === 0 ? origName : "",
+        r.article,
+        r.income  > 0 ? r.income  : "",
+        r.expense < 0 ? r.expense : "",
+        "", "", "", "", ""
+      ]);
+      rowMeta.push({
+        type : idx === 0 ? "project_first" : "article",
+        even : isEvenProject,
+        idx  : idx,
+      });
+    });
+
+    // Если у проекта нет строк из расшифровки, но есть доставка —
+    // первая строка должна показать название проекта
+    if (rows.length === 0 && deliveryCost > 0) {
+      outputRows.push([origName, "", "", "", "", "", "", "", ""]);
+      rowMeta.push({ type: "project_first", even: isEvenProject });
+    }
+
+    // Доп. строка "Доставка автовозами" если сумма > 0
+    if (deliveryCost > 0) {
+      outputRows.push([
+        "",
+        "Доставка автовозами",
+        "",
+        -Math.abs(deliveryCost), // всегда расход (отрицательное)
+        "", "", "", "", ""
+      ]);
+      rowMeta.push({
+        type : "article",
+        even : isEvenProject,
+        idx  : rows.length, // следующий индекс для чередования цвета
+      });
+    }
+
+    // Итоги по проекту (с учётом доставки автовозами)
+    const sumIncome  = rows.reduce((s, r) => s + r.income,  0);
+    const sumExpense = rows.reduce((s, r) => s + r.expense, 0)
+                      - Math.abs(deliveryCost); // доставка — расход
+
+    const marginal   = sumIncome + sumExpense;
+    const gross      = marginal - overheadPerProject;
+    const margin     = sumIncome !== 0 ? marginal / sumIncome : 0;
+
+    grandSumC += sumIncome;
+    grandSumD += sumExpense;
+    grandSumE += marginal;
+    grandSumF += overheadPerProject;
+    grandSumG += gross;
+    if (sumIncome !== 0) marginValues.push(margin);
+
+    outputRows.push([
+      "Итого по Проекту", "",
+      sumIncome, sumExpense,
+      marginal, overheadPerProject, gross, margin, ""
+    ]);
+    rowMeta.push({ type: "subtotal" });
+  });
+
+  // Строка ИТОГО
+  const grandMargin = marginValues.length > 0
+    ? marginValues.reduce((s, v) => s + v, 0) / marginValues.length : "";
+
+  outputRows.push([
+    "ИТОГО", "",
+    grandSumC, grandSumD,
+    grandSumE, grandSumF,
+    grandSumG, grandMargin, ""
+  ]);
+  rowMeta.push({ type: "grand" });
+
+  // ── Шаг 7: Очищаем и записываем ──────────────────────────────
+  const lastRow = sheetReport.getLastRow();
+  if (lastRow >= 3) {
+    sheetReport.getRange(3, 1, lastRow - 2, 9)
+      .clearContent().setBackground(null).setFontWeight("normal")
+      .setFontColor(null).setFontSize(10)
+      .setBorder(false, false, false, false, false, false)
+      .setHorizontalAlignment("left");
+    SpreadsheetApp.flush();
+  }
+
+  sheetReport.getRange("I1").setValue(projectCount);
+  sheetReport.getRange("I3").setValue(projectCount);
+  sheetReport.getRange(3, 1, outputRows.length, 9).setValues(outputRows);
+  SpreadsheetApp.flush();
+
+  // ── Шаг 8: Форматирование ─────────────────────────────────────
+  const startRow  = 3;
+  const numFmt    = '#,##0.00;[RED]-#,##0.00;"-"';
+  const pctFmt    = "0.00%";
+  const totalRows = outputRows.length;
+
+  sheetReport.getRange(startRow, 1, totalRows, 9)
+    .setFontFamily("Arial").setFontSize(10).setVerticalAlignment("middle");
+
+  rowMeta.forEach((meta, idx) => {
+    const r   = startRow + idx;
+    const row = sheetReport.getRange(r, 1, 1, 9);
+
+    switch (meta.type) {
+
+      case "project_first":
+        row.setBackground(COLORS.projectBg)
+           .setFontColor(COLORS.projectText)
+           .setFontWeight("bold").setFontSize(10);
+        row.setBorder(true, null, null, null, null, null,
+          COLORS.headerBg, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+        sheetReport.getRange(r, 3, 1, 2).setNumberFormat(numFmt);
+        break;
+
+      case "article":
+        row.setBackground(
+             meta.idx % 2 === 0 ? COLORS.rowOdd : COLORS.rowEven)
+           .setFontColor("#374151");
+        row.setBorder(false, null, true, null, null, null,
+          COLORS.gridColor, SpreadsheetApp.BorderStyle.DOTTED);
+        sheetReport.getRange(r, 3, 1, 2).setNumberFormat(numFmt);
+        break;
+
+      case "subtotal":
+        row.setBackground(COLORS.subtotalBg)
+           .setFontColor(COLORS.subtotalText)
+           .setFontWeight("bold").setFontSize(10);
+        row.setBorder(true, null, true, null, null, null,
+          COLORS.subtotalBorder, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+        sheetReport.getRange(r, 3, 1, 4).setNumberFormat(numFmt);
+        sheetReport.getRange(r, 8, 1, 1).setNumberFormat(pctFmt);
+        sheetReport.getRange(r, 3, 1, 6).setHorizontalAlignment("right");
+        break;
+
+      case "grand":
+        row.setBackground(COLORS.grandBg)
+           .setFontColor(COLORS.grandText)
+           .setFontWeight("bold").setFontSize(11);
+        row.setBorder(true, null, true, null, null, null,
+          "#0f172a", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+        sheetReport.getRange(r, 3, 1, 5).setNumberFormat(numFmt);
+        sheetReport.getRange(r, 8, 1, 1).setNumberFormat(pctFmt);
+        sheetReport.getRange(r, 3, 1, 6).setHorizontalAlignment("right");
+        break;
+    }
+  });
+
+  sheetReport.getRange(startRow, 3, totalRows, 6)
+    .setHorizontalAlignment("right");
+  sheetReport.getRange(startRow, 1, totalRows, 2)
+    .setHorizontalAlignment("left");
+
+  // Внешняя рамка и вертикальные линии
+  sheetReport.getRange(startRow, 1, totalRows, 9)
+    .setBorder(true, true, true, true, null, null,
+      COLORS.gridDark, SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+  sheetReport.getRange(startRow, 1, totalRows, 9)
+    .setBorder(null, null, null, null, true, null,
+      COLORS.gridColor, SpreadsheetApp.BorderStyle.SOLID);
+
+  // Строка заголовков
+  sheetReport.getRange(2, 1, 1, 9)
+    .setBackground(COLORS.headerBg)
+    .setFontColor(COLORS.headerText)
+    .setFontWeight("bold").setFontSize(10)
+    .setHorizontalAlignment("center")
+    .setVerticalAlignment("middle")
+    .setWrapStrategy(SpreadsheetApp.WrapStrategy.WRAP);
+  sheetReport.setRowHeight(2, 40);
+
+  // Высота строк
+  rowMeta.forEach((meta, idx) => {
+    sheetReport.setRowHeight(
+      startRow + idx,
+      meta.type === "article" ? 22 : 28
+    );
+  });
+
+  // Ширина колонок
+  sheetReport.setColumnWidth(1, 200);
+  sheetReport.setColumnWidth(2, 220);
+  sheetReport.setColumnWidth(3, 130);
+  sheetReport.setColumnWidth(4, 130);
+  sheetReport.setColumnWidth(5, 140);
+  sheetReport.setColumnWidth(6, 140);
+  sheetReport.setColumnWidth(7, 140);
+  sheetReport.setColumnWidth(8, 110);
+  sheetReport.setColumnWidth(9, 100);
+
+  sheetReport.setFrozenRows(2);
+
+  // Лог сопоставлений
+  Logger.log("=== Сопоставления проектов ===");
+  projectOrder.forEach(k =>
+    Logger.log(`  "${salesOrigNames[k]}" → "${matchMap[k] || 'НЕ НАЙДЕН'}" | доставка: ${deliveryMap[k] || 0}`)
+  );
+
+  const months = ["","Январь","Февраль","Март","Апрель","Май","Июнь",
+                  "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
+
+  SpreadsheetApp.getUi().alert(
+    `✅ Отчёт сформирован!\n\n` +
+    `📅 Период: ${months[targetMonth]} ${targetYear}\n` +
+    `💰 Общие расходы (E1): ${formatMoney(totalOverhead)} руб.\n` +
+    `🚗 Проектов: ${projectCount}\n` +
+    `📊 Накладные на проект: ${formatMoney(overheadPerProject)} руб.\n` +
+    `📋 Строк в отчёте: ${totalRows}\n\n` +
+    `Лог сопоставлений: Расширения → Apps Script → Выполнение`
+  );
+}
+
+
+// ════════════════════════════════════════════════════════════
+//  ЛОГИКА СОПОСТАВЛЕНИЯ
+// ════════════════════════════════════════════════════════════
+
+function findBestMatch(salesName, candidateList) {
+  if (!candidateList || candidateList.length === 0) {
+    return { match: null, score: 0 };
+  }
+  for (const c of candidateList) {
+    if (c.toLowerCase().trim() === salesName.toLowerCase().trim()) {
+      return { match: c, score: 999 };
+    }
+  }
+  const digits4 = extractDigits4(salesName);
+  let bestMatch = null;
+  let bestScore = -1;
+
+  for (const det of candidateList) {
+    const dDigits      = extractDigits4(det);
+    const digitMatches = digits4.filter(d => dDigits.includes(d)).length;
+    if (digitMatches === 0 && digits4.length > 0) continue;
+    const ws    = wordOverlapScore(salesName, det);
+    const score = digitMatches * 100 + ws;
+    if (score > bestScore) { bestScore = score; bestMatch = det; }
+  }
+
+  if (!bestMatch && digits4.length === 0) {
+    for (const det of candidateList) {
+      const ws = wordOverlapScore(salesName, det);
+      if (ws > bestScore) { bestScore = ws; bestMatch = det; }
+    }
+  }
+  return { match: bestMatch, score: bestScore };
+}
+
+function extractDigits4(name) {
+  const m = String(name).match(/\b\d{4}\b/g);
+  return m ? m : [];
+}
+
+function wordOverlapScore(a, b) {
+  const wa = tokenize(a);
+  const wb = tokenize(b);
+  if (!wa.length || !wb.length) return 0;
+  const sb = new Set(wb);
+  return Math.round(
+    wa.filter(w => sb.has(w)).length / Math.max(wa.length, wb.length) * 100
+  );
+}
+
+function tokenize(str) {
+  return String(str).toLowerCase()
+    .replace(/\d+/g, " ")
+    .split(/[\s\-\/]+/)
+    .map(w => w.trim())
+    .filter(w => w.length > 1);
+}
+
+
+// ════════════════════════════════════════════════════════════
+//  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ════════════════════════════════════════════════════════════
+
+function findSheet(ss, keyword) {
+  const kw = keyword.toLowerCase();
+  return ss.getSheets().find(
+    s => s.getName().toLowerCase().includes(kw)
+  ) || null;
+}
+
+function findCol(headers, keywords) {
+  for (let i = 0; i < headers.length; i++) {
+    for (const kw of keywords) {
+      if (headers[i].includes(kw.toLowerCase())) return i;
+    }
+  }
+  return -1;
+}
+
+function parseNum(val) {
+  if (typeof val === "number") return val;
+  const n = parseFloat(
+    String(val).replace(/\s/g, "").replace(",", ".")
+  );
+  return isNaN(n) ? 0 : n;
+}
+
+function formatMoney(n) {
+  return n.toLocaleString("ru-RU", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function showError(msg) {
+  SpreadsheetApp.getUi().alert("⚠️ Ошибка\n\n" + msg);
+}
+
+
+// ════════════════════════════════════════════════════════════
+//  МЕНЮ
+// ════════════════════════════════════════════════════════════
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+
+  // Меню отчёта по авто
+  ui.createMenu("📊 CFO Отчёты")
+    .addItem("▶ Сформировать отчёт", "generateProfitReport")
+    .addToUi();
+
+  // Меню ОПиУ
+  ui.createMenu("📋 ОПиУ")
+    .addItem("▶ Сформировать ОПиУ", "generateOPiU")
+    .addToUi();
+}
